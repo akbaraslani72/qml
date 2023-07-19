@@ -1,0 +1,130 @@
+import pennylane as qml
+import numpy as np
+import torch
+import torch.optim as optim
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
+# Define the quantum circuit
+n_qubit = 4
+dev = qml.device("default.qubit", wires=n_qubit)
+
+
+# Parameterized Rotation & Entanglement Layers
+def layer(W):
+    for i in range(n_qubit):
+        qml.RX(W[i, 0], wires=i)
+        qml.RY(W[i, 1], wires=i)
+        qml.RZ(W[i, 2], wires=i)
+
+
+# Classical Critic
+class V(nn.Module):
+    def __init__(self):
+        super(V, self).__init__()
+        self.fc1 = nn.Linear(4, 256)
+        self.fc_v = nn.Linear(256, 1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        v = self.fc_v(x)
+        return v
+
+
+# Variational Quantum Policy Circuit (Actor)
+@qml.qnode(dev, interface='torch')
+def circuit(W, s):
+    # W: Layer Variable Parameters, s: State Variable
+    # Input Encoding
+    for i in range(n_qubit):
+        qml.RY(np.pi * s[i], wires=i)
+
+    # Variational Quantum Circuit
+    layer(W[0])
+    for i in range(n_qubit - 1):
+        qml.CNOT(wires=[i, i + 1])
+    layer(W[1])
+    for i in range(n_qubit - 1):
+        qml.CNOT(wires=[i, i + 1])
+    layer(W[2])
+    for i in range(n_qubit - 1):
+        qml.CNOT(wires=[i, i + 1])
+    qml.CNOT(wires=[0, 2])
+    qml.CNOT(wires=[1, 3])
+    return [qml.expval(qml.PauliY(ind)) for ind in range(2, 4)]
+
+
+# Declare Quantum Circuit and Parameters
+W = torch.tensor(np.random.rand(4, 4, 3), requires_grad=True)
+v = V()
+circuit_pi = circuit
+optimizer1 = optim.Adam([W], lr=1e-3)
+optimizer2 = optim.Adam(v.parameters(), lr=1e-5)
+
+
+# Define the loss function
+def loss_fn(W, s, V, circuit_pi):
+    # Quantum Circuit Output
+    q_out = circuit_pi(W, s)
+
+    # Classical Critic Output
+    c_out = V(torch.tensor(s, dtype=torch.float32))
+
+    # Compute the loss
+    loss = torch.sum((q_out[0] - q_out[1]) * c_out)
+
+    return loss
+
+
+# Training Loop
+num_epochs = 10000
+for epoch in range(num_epochs):
+    # Generate some random input data
+    s = np.random.randn(n_qubit)
+
+    # Evaluate the quantum circuit and the classical critic
+    q_out = circuit_pi(W, s)
+    c_out = v(torch.tensor(s, dtype=torch.float32))
+
+    # Compute the loss and the gradients
+    loss = loss_fn(W, s, v, circuit_pi)
+    loss.backward()
+
+    # Update the parameters of the quantum circuit and the classical critic
+    optimizer1.step()
+    optimizer2.step()
+    optimizer1.zero_grad()
+    optimizer2.zero_grad()
+
+    # Print the loss
+    if epoch % 100 == 0:
+        print(f"Epoch {epoch} - Loss: {loss.item()}")
+
+# Evaluate the quantum circuit using some test input data
+s_test = np.random.randn(n_qubit)
+q_out_test = circuit_pi(W, s_test)
+
+# Sample from the distribution of Pauli operator measurements
+shots = 10000
+p0 = (1 + q_out_test[0]) / 2
+p1 = (1 + q_out_test[1]) / 2
+counts = np.zeros(2 ** n_qubit)
+for i in range(shots):
+    state = ""
+    for j in range(n_qubit):
+        if np.random.rand() < p0.item():
+            state += "0"
+        else:
+            state += "1"
+    counts[int(state, 2)] += 1
+
+# Normalize the counts to get probabilities
+probabilities = counts / shots
+
+# Plot the probability distribution as a line graph
+plt.plot(range(2 ** n_qubit), probabilities)
+plt.title("Probability Distribution of Quantum Circuit Output")
+plt.xlabel("Computational Basis State")
+plt.ylabel("Probability")
+plt.show()
